@@ -32,5 +32,7 @@ import vllm_ascend.patch.platform.patch_minimax_usage_accounting  # noqa
 import vllm_ascend.patch.platform.patch_glm_tool_call_parser  # noqa
 import vllm_ascend.patch.platform.patch_tool_choice_none_content  # noqa
 
+import vllm_ascend.patch.platform.patch_ttft_timing  # noqa
+
 if envs.VLLM_ASCEND_BALANCE_SCHEDULING:
     import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
