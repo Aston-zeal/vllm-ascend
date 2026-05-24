@@ -103,13 +103,15 @@ try:
 
     _orig_base_request_id = OpenAIServing._base_request_id
 
-    @staticmethod
     def _patched_base_request_id(
-        raw_request: Any, default: str | None = None
+        self: OpenAIServing, raw_request: Any, default: str | None = None
     ) -> str | None:
         result = _orig_base_request_id(raw_request, default)
-        if result and default:
-            _ttft_log(f"chatcmpl-{result}", f"id_mapped_from_{default}")
+        # Use the stashed raw_req_id (set in _patched_create_chat_completion)
+        # instead of `default` because `default` may be None or differ.
+        raw_req_id = getattr(self, "_ttft_raw_req_id", default)
+        if result and raw_req_id:
+            _ttft_log(f"chatcmpl-{result}", f"id_mapped_from_{raw_req_id}")
         return result
 
     OpenAIServing._base_request_id = _patched_base_request_id
