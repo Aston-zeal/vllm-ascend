@@ -749,119 +749,133 @@ def export_csv(
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-#  Timeline visualization
+#  Timeline visualization (matplotlib image)
 # ---------------------------------------------------------------------------
 
-# Pipeline order for the timeline: (stage_name, is_duration, label)
-_TIMELINE_ORDER: list[tuple[str, bool, str]] = [
-    ("api_request_start", False, "API入口"),
-    ("render_chat", True, "渲染(下载+分词+HF)"),
-    ("gap_render_to_dispatch", True, "> 分发"),
-    ("input_processing", True, "输入处理"),
-    ("engine_core_dispatch", True, "ZMQ发送"),
-    ("queue_wait", True, "队列等待"),
-    ("scheduler_exec", True, "调度处理"),
-    ("gap_scheduled_to_work", True, "> Worker排队"),
-    ("worker_model_exec", True, "Worker执行"),
-    ("worker_forward_pass", True, "  LLM前向"),
-    ("gap_work_to_output", True, "> 结果回传"),
-    ("first_token_api_yield", False, "首Token返回"),
+_TIMELINE_ORDER: list[tuple[str, str, str, str]] = [
+    # (stage_name, kind, label, color)
+    # kind: "dur"=duration bar, "gap"=gap/wait bar, "pt"=point marker
+    ("render_chat", "dur", "渲染(下载+分词+HF)", "#4472C4"),
+    ("gap_render_to_dispatch", "gap", "分发间隔", "#D9D9D9"),
+    ("input_processing", "dur", "输入处理", "#5B9BD5"),
+    ("engine_core_dispatch", "dur", "ZMQ发送", "#ED7D31"),
+    ("queue_wait", "gap", "队列等待", "#D9D9D9"),
+    ("scheduler_exec", "gap", "调度处理", "#D9D9D9"),
+    ("gap_scheduled_to_work", "gap", "Worker排队", "#D9D9D9"),
+    ("worker_forward_pass", "dur", "LLM前向", "#A5A5A5"),
+    ("gap_work_to_output", "gap", "结果回传", "#D9D9D9"),
 ]
 
 
-def _bar(width: int, char: str = "█") -> str:
-    return char * max(width, 0)
-
-
-def print_timeline(
+def save_timeline_image(
     per_request: dict[str, dict[str, float | None]],
     ttft_stats: dict[str, float],
-) -> None:
-    """Print a visual time-axis chart of the average request pipeline."""
+    output_path: str = "ttft_timeline.png",
+) -> bool:
+    """Generate a Gantt-style timeline image showing per-stage timing."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     if not ttft_stats:
-        return
+        return False
 
     total_ms = ttft_stats.get("avg_ms", 0)
     if total_ms <= 0:
-        return
+        return False
 
-    # Collect average values for each stage across all requests
+    # Collect average per-stage durations
     avg_vals: dict[str, float] = {}
-
-    # Average durations
-    for stage_name, is_dur, _ in _TIMELINE_ORDER:
+    for stage_name, _, _, _ in _TIMELINE_ORDER:
         vals: list[float] = []
         for stages in per_request.values():
             v = stages.get(stage_name)
             if v is not None:
                 vals.append(v)
-        if vals:
-            avg_vals[stage_name] = sum(vals) / len(vals)
-        else:
-            avg_vals[stage_name] = 0
+        avg_vals[stage_name] = (sum(vals) / len(vals) * 1000) if vals else 0
 
-    # Build timeline segments
-    bar_width = 80
-    scale = bar_width / total_ms if total_ms > 0 else 0
+    # Build segments, computing cumulative start time
+    segments: list[dict] = []  # {kind, label, start, width, color, text}
+    cursor = 0.0
+    for stage_name, kind, label, color in _TIMELINE_ORDER:
+        w = avg_vals.get(stage_name, 0)
+        if w < 0.1 and kind != "pt":
+            continue
+        w = max(w, 0.3)  # minimum visible width
+        segments.append({
+            "kind": kind,
+            "label": label,
+            "start": cursor,
+            "width": w,
+            "color": color,
+        })
+        cursor += w
 
-    print()
-    print("  " + "═" * 90)
-    print("                         Average Pipeline Timeline")
-    print("  " + "═" * 90)
-    print()
-    print(f"  Total TTFT: {_ms(total_ms)}  (scale: 1 char ≈ {total_ms / bar_width:.1f}ms)")
-    print()
+    total_span = cursor
 
-    # Build a linear timeline with segments
-    timeline_segments: list[tuple[str, float, str]] = []  # (label, width_chars, kind)
+    # --- Draw ---
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.set_xlim(0, total_span * 1.05)
 
-    for stage_name, is_dur, label in _TIMELINE_ORDER:
-        val_ms = avg_vals.get(stage_name, 0) * 1000
-        if val_ms <= 0.01 and is_dur:
-            continue  # skip trivial gaps/stages
-        w = int(val_ms * scale) if val_ms > 0 else 0
-        if w > 0:
-            if is_dur:
-                timeline_segments.append((label, w, "dur"))
-            else:
-                timeline_segments.append((label, 1, "pt"))
+    y_base = 0
+    bar_height = 0.7
 
-    # Draw bar
-    parts: list[str] = []
-    pos = 0
+    for seg in segments:
+        kind = seg["kind"]
+        color = seg["color"]
+        left = seg["start"]
+        width = seg["width"]
 
-    for label, w, kind in timeline_segments:
         if kind == "dur":
-            bar_char = "█"
-        else:
-            bar_char = "▌"
-        parts.append(_bar(w, bar_char))
-        pos += w
+            rect = plt.Rectangle((left, y_base - bar_height / 2), width, bar_height,
+                                 facecolor=color, edgecolor="white", linewidth=0.5, zorder=2)
+            ax.add_patch(rect)
+            # Label inside bar
+            if width > total_span * 0.04:
+                ax.text(left + width / 2, y_base, f"{seg['label']}\n{width:.1f}ms",
+                        ha="center", va="center", fontsize=8, color="white",
+                        fontweight="bold")
+            else:
+                ax.text(left + width / 2, y_base + 0.6, f"{width:.1f}ms",
+                        ha="center", va="bottom", fontsize=7, color="#333")
+        elif kind == "gap":
+            rect = plt.Rectangle((left, y_base - 0.12), width, 0.24,
+                                 facecolor=color, edgecolor="#BBB", linewidth=0.3, zorder=1)
+            ax.add_patch(rect)
+            if width > total_span * 0.03:
+                ax.text(left + width / 2, y_base, f"{seg['label']}\n{width:.1f}ms",
+                        ha="center", va="center", fontsize=6.5, color="#666")
 
-    bar_line = "  |" + "".join(parts) + "|"
-    print(bar_line)
+        # Vertical connector line
+        ax.axvline(x=left, ymin=0.1, ymax=0.9, color="#AAA", linewidth=0.4, linestyle="--", zorder=0)
 
-    # Draw time markers
-    marker_positions: list[tuple[int, str]] = []
-    pos = 1
-    for label, w, kind in timeline_segments:
-        mid = pos + w // 2
-        short = label[:10]
-        marker_positions.append((mid, short))
-        pos += w
+    # End marker
+    ax.axvline(x=cursor, ymin=0.1, ymax=0.9, color="#333", linewidth=1, linestyle="-", zorder=0)
+    ax.text(cursor + total_span * 0.01, y_base + 0.7, f"TTFT\n{total_ms:.0f}ms",
+            ha="left", va="bottom", fontsize=9, fontweight="bold", color="#C00000")
 
-    # Simple label line
-    label_line = "  ｜"
-    for mid, short in marker_positions:
-        # Place label at segment midpoint
-        pad = mid - len(label_line)
-        if pad > 0:
-            label_line += " " * (pad - 1) + short
-    print(label_line)
+    # Decorations
+    ax.set_ylim(-1.2, 1.2)
+    ax.set_yticks([])
+    ax.set_xlabel("Time (ms)", fontsize=10)
+    ax.set_title(f"Average Pipeline Timeline  (TTFT={total_ms:.0f}ms, {ttft_stats.get('count',0)} requests)",
+                 fontsize=12, fontweight="bold")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
 
     # Legend
-    print()
-    print(f"  ██ = 耗时阶段    ▌ = 时间点    ")
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor="#4472C4", label="Execution stages"),
+        Patch(facecolor="#D9D9D9", label="Gaps / idle time"),
+    ]
+    ax.legend(handles=legend_elements, loc="upper right", fontsize=8)
+
+    plt.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -898,6 +912,13 @@ def main() -> None:
         default=None,
         help="Export per-request data to CSV file",
     )
+    parser.add_argument(
+        "--timeline",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Generate a timeline image (PNG), e.g. --timeline timeline.png",
+    )
     args = parser.parse_args()
 
     # ---- Parse ----
@@ -932,7 +953,6 @@ def main() -> None:
 
     # ---- Print ----
     print_summary(per_request, stage_stats, point_stats, ttft_stats)
-    print_timeline(per_request, ttft_stats)
     print_batch_stats(entries)
     print_temp_stats(entries)
 
@@ -969,6 +989,14 @@ def main() -> None:
     # ---- CSV export ----
     if args.csv:
         export_csv(per_request, args.csv)
+
+    # ---- Timeline image ----
+    if args.timeline:
+        ok = save_timeline_image(per_request, ttft_stats, args.timeline)
+        if ok:
+            print(f"\n  Timeline image saved to: {args.timeline}")
+        else:
+            print("\n  Timeline: not enough data or matplotlib missing (pip install matplotlib)")
 
     print()
     print(TTFT_STAGE_DESCRIPTION)
