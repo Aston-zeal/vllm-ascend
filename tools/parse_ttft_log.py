@@ -70,19 +70,15 @@ DERIVED_PAIRS: dict[str, tuple[str, str]] = {
 GAP_STAGES: list[tuple[str, str, str]] = [
     ("gap_render_to_dispatch", "render_chat_end", "api_server_dispatch"),
     ("gap_input_to_dispatch", "input_processing_end", "engine_core_dispatch_start"),
-    ("gap_dispatch_to_ec", "engine_core_dispatch_end", "engine_core_add_request"),
     ("gap_enqueue_to_pickup", "scheduler_enqueue_waiting", "scheduler_pickup_from_waiting"),
     ("gap_scheduled_to_work", "scheduler_scheduled", "worker_model_exec_start"),
-    ("gap_work_to_output", "worker_model_exec_end", "first_token_output"),
 ]
 
 _GAP_CN: dict[str, str] = {
-    "gap_render_to_dispatch": "渲染完成→分发 间隔",
-    "gap_input_to_dispatch": "输入处理→分发 间隔",
-    "gap_dispatch_to_ec": "分发→EngineCore(ZMQ) 间隔",
-    "gap_enqueue_to_pickup": "入队→取出 队列等待",
-    "gap_scheduled_to_work": "调度完成→Worker执行 间隔",
-    "gap_work_to_output": "Worker→首Token 间隔",
+    "gap_render_to_dispatch": "渲染完成→分发 间隔(D侧)",
+    "gap_input_to_dispatch": "输入处理→分发 间隔(D侧)",
+    "gap_enqueue_to_pickup": "入队→取出 队列等待(P侧)",
+    "gap_scheduled_to_work": "调度完成→Worker执行 间隔(P侧)",
 }
 
 TTFT_STAGE_DESCRIPTION = """
@@ -117,11 +113,9 @@ TTFT_STAGE_DESCRIPTION = """
 ║   first_token_output      — OutputProcessor 检测到首 token                    ║
 ║   first_token_api_yield   — 首 token 返回客户端                                ║
 ║ 间隔(派生, 前后阶段间的空闲/传输时间)                                            ║
-║   gap_render_to_dispatch  — 渲染完成→分发                                     ║
-║   gap_input_to_dispatch   — 输入处理→分发                                     ║
-║   gap_dispatch_to_ec      — ZMQ 跨进程传输                                     ║
-║   gap_scheduled_to_work   — 调度→Worker 执行排队                               ║
-║   gap_work_to_output      — Worker 执行→首Token 检测                           ║
+║   gap_render_to_dispatch  — 渲染完成→分发(D侧, 同进程)                         ║
+║   gap_input_to_dispatch   — 输入处理→分发(D侧, 同进程)                          ║
+║   gap_scheduled_to_work   — 调度→Worker 执行排队(P侧, 同进程)                   ║
 ║ 统计指标                                                                       ║
 ║   count — 有效样本数    avg — 平均值    p50 — 中位数(50%)                      ║
 ║   p99 — 99分位    min/max — 最小/最大值                                       ║
@@ -687,9 +681,7 @@ def print_request_detail(
         ("mooncake_kv_load", True),
         ("gap_render_to_dispatch", True),
         ("gap_input_to_dispatch", True),
-        ("gap_dispatch_to_ec", True),
         ("gap_scheduled_to_work", True),
-        ("gap_work_to_output", True),
     ]
 
     for stage, is_duration in display_order:
