@@ -828,6 +828,7 @@ def print_timeline(
 
     # Draw bar
     parts: list[str] = []
+    pos = 0
 
     for label, w, kind in timeline_segments:
         if kind == "dur":
