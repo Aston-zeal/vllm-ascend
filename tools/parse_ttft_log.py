@@ -745,135 +745,6 @@ def export_csv(
 
 
 # ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-#  Timeline visualization (matplotlib image)
-# ---------------------------------------------------------------------------
-
-_TIMELINE_ORDER: list[tuple[str, str, str, str]] = [
-    # (stage_name, kind, label, color)
-    # kind: "dur"=execution, "gap"=wait/idle
-    ("render_chat", "dur", "渲染", "#4472C4"),
-    ("gap_render_to_dispatch", "gap", "分发间隔", "#D9D9D9"),
-    ("input_processing", "dur", "输入处理", "#5B9BD5"),
-    ("engine_core_dispatch", "dur", "ZMQ", "#ED7D31"),
-    ("queue_wait", "gap", "队列等待", "#D9D9D9"),
-    ("scheduler_exec", "gap", "调度", "#D9D9D9"),
-    ("gap_scheduled_to_work", "gap", "Worker排队", "#D9D9D9"),
-    ("worker_forward_pass", "dur", "LLM前向", "#2E7D32"),
-    ("gap_work_to_output", "gap", "回传", "#D9D9D9"),
-]
-
-
-def save_timeline_image(
-    per_request: dict[str, dict[str, float | None]],
-    ttft_stats: dict[str, float],
-    output_path: str = "ttft_timeline.png",
-) -> bool:
-    """Generate a line-style timeline image with per-stage duration labels."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    if not ttft_stats:
-        return False
-
-    total_ms = ttft_stats.get("avg_ms", 0)
-    if total_ms <= 0:
-        return False
-
-    # Collect average durations (ms)
-    avg_ms: dict[str, float] = {}
-    for stage_name, _, _, _ in _TIMELINE_ORDER:
-        vals: list[float] = []
-        for stages in per_request.values():
-            v = stages.get(stage_name)
-            if v is not None:
-                vals.append(v)
-        avg_ms[stage_name] = (sum(vals) / len(vals) * 1000) if vals else 0
-
-    # Build timeline positions
-    segments: list[dict] = []
-    t = 0.0
-    for sn, kind, label, color in _TIMELINE_ORDER:
-        w = max(avg_ms.get(sn, 0), 0.01)
-        segments.append({"kind": kind, "label": label, "t0": t, "width": w, "color": color})
-        t += w
-    total_span = t
-
-    # --- Draw ---
-    fig, ax = plt.subplots(figsize=(16, 3.5))
-    ax.set_xlim(-total_span * 0.02, total_span * 1.08)
-    ax.set_ylim(-0.6, 1.2)
-    ax.axis("off")
-
-    # Main horizontal axis line
-    ax.axhline(y=0, xmin=0, xmax=1, color="#333", linewidth=1.5, zorder=0)
-
-    # Arrow at end
-    ax.annotate("", xy=(total_span * 1.05, 0), xytext=(total_span, 0),
-                arrowprops=dict(arrowstyle="->", color="#333", lw=2))
-
-    last_t = 0.0
-    for i, seg in enumerate(segments):
-        t0 = seg["t0"]
-        width = seg["width"]
-        t1 = t0 + width
-        mid = t0 + width / 2
-        kind = seg["kind"]
-        color = seg["color"]
-        label = seg["label"]
-
-        lw = 4.5 if kind == "dur" else 1.5
-
-        # Draw segment on the axis line
-        ax.plot([t0, t1], [0, 0], color=color, linewidth=lw, solid_capstyle="butt", zorder=2)
-
-        # Tick mark at start
-        ax.plot([t0, t0], [-0.15, 0.15], color="#888", linewidth=0.8, zorder=1)
-
-        # Duration annotation above line
-        y_offset = 0.25
-        va = "bottom"
-        if kind == "dur":
-            ax.text(mid, y_offset, f"{width:.1f}ms", ha="center", va=va,
-                    fontsize=7.5, fontweight="bold", color=color)
-        else:
-            if width > total_span * 0.01:
-                ax.text(mid, y_offset, f"{width:.1f}ms", ha="center", va=va,
-                        fontsize=6.5, color="#999")
-
-        # Stage label below line (alternating up/down to avoid overlap)
-        # Use vertical stagger: even segments label above, odd below for dur
-        if kind == "dur":
-            label_y = 0.55 + (0.25 if i % 2 == 0 else -0.15)
-            ax.text(mid, label_y, label, ha="center", va="bottom" if label_y > 0.3 else "top",
-                    fontsize=8, fontweight="bold", color="#333")
-        else:
-            label_y = -0.28
-            ax.text(mid, label_y, label, ha="center", va="top",
-                    fontsize=6.5, color="#999")
-
-    # End tick
-    ax.plot([total_span, total_span], [-0.15, 0.15], color="#888", linewidth=0.8, zorder=1)
-
-    # Total TTFT label at end
-    ax.text(total_span * 1.01, 0, f" TTFT = {total_ms:.0f}ms",
-            ha="left", va="center", fontsize=11, fontweight="bold", color="#C00000")
-
-    # Title
-    ax.set_title(f"Average Pipeline Timeline ({ttft_stats.get('count',0)} requests)",
-                 fontsize=13, fontweight="bold", pad=15)
-
-    plt.tight_layout()
-    fig.savefig(output_path, dpi=180, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    return True
-
-
-# ---------------------------------------------------------------------------
 #  Main
 # ---------------------------------------------------------------------------
 
@@ -906,13 +777,6 @@ def main() -> None:
         type=str,
         default=None,
         help="Export per-request data to CSV file",
-    )
-    parser.add_argument(
-        "--timeline",
-        type=str,
-        default=None,
-        metavar="FILE",
-        help="Generate a timeline image (PNG), e.g. --timeline timeline.png",
     )
     args = parser.parse_args()
 
@@ -984,14 +848,6 @@ def main() -> None:
     # ---- CSV export ----
     if args.csv:
         export_csv(per_request, args.csv)
-
-    # ---- Timeline image ----
-    if args.timeline:
-        ok = save_timeline_image(per_request, ttft_stats, args.timeline)
-        if ok:
-            print(f"\n  Timeline image saved to: {args.timeline}")
-        else:
-            print("\n  Timeline: not enough data or matplotlib missing (pip install matplotlib)")
 
     print()
     print(TTFT_STAGE_DESCRIPTION)
