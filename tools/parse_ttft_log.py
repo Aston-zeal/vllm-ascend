@@ -748,6 +748,125 @@ def export_csv(
 # Main
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+#  Timeline visualization
+# ---------------------------------------------------------------------------
+
+# Pipeline order for the timeline: (stage_name, is_duration, label)
+_TIMELINE_ORDER: list[tuple[str, bool, str]] = [
+    ("api_request_start", False, "API入口"),
+    ("render_chat", True, "渲染(下载+分词+HF)"),
+    ("gap_render_to_dispatch", True, "> 分发"),
+    ("input_processing", True, "输入处理"),
+    ("engine_core_dispatch", True, "ZMQ发送"),
+    ("queue_wait", True, "队列等待"),
+    ("scheduler_exec", True, "调度处理"),
+    ("gap_scheduled_to_work", True, "> Worker排队"),
+    ("worker_model_exec", True, "Worker执行"),
+    ("worker_forward_pass", True, "  LLM前向"),
+    ("gap_work_to_output", True, "> 结果回传"),
+    ("first_token_api_yield", False, "首Token返回"),
+]
+
+
+def _bar(width: int, char: str = "█") -> str:
+    return char * max(width, 0)
+
+
+def print_timeline(
+    per_request: dict[str, dict[str, float | None]],
+    ttft_stats: dict[str, float],
+) -> None:
+    """Print a visual time-axis chart of the average request pipeline."""
+    if not ttft_stats:
+        return
+
+    total_ms = ttft_stats.get("avg_ms", 0)
+    if total_ms <= 0:
+        return
+
+    # Collect average values for each stage across all requests
+    avg_vals: dict[str, float] = {}
+
+    # Average durations
+    for stage_name, is_dur, _ in _TIMELINE_ORDER:
+        vals: list[float] = []
+        for stages in per_request.values():
+            v = stages.get(stage_name)
+            if v is not None:
+                vals.append(v)
+        if vals:
+            avg_vals[stage_name] = sum(vals) / len(vals)
+        else:
+            avg_vals[stage_name] = 0
+
+    # Build timeline segments
+    bar_width = 80
+    scale = bar_width / total_ms if total_ms > 0 else 0
+
+    print()
+    print("  " + "═" * 90)
+    print("                         Average Pipeline Timeline")
+    print("  " + "═" * 90)
+    print()
+    print(f"  Total TTFT: {_ms(total_ms)}  (scale: 1 char ≈ {total_ms / bar_width:.1f}ms)")
+    print()
+
+    # Build a linear timeline with segments
+    timeline_segments: list[tuple[str, float, str]] = []  # (label, width_chars, kind)
+
+    for stage_name, is_dur, label in _TIMELINE_ORDER:
+        val_ms = avg_vals.get(stage_name, 0) * 1000
+        if val_ms <= 0.01 and is_dur:
+            continue  # skip trivial gaps/stages
+        w = int(val_ms * scale) if val_ms > 0 else 0
+        if w > 0:
+            if is_dur:
+                timeline_segments.append((label, w, "dur"))
+            else:
+                timeline_segments.append((label, 1, "pt"))
+
+    # Draw bar
+    parts: list[str] = []
+
+    for label, w, kind in timeline_segments:
+        if kind == "dur":
+            bar_char = "█"
+        else:
+            bar_char = "▌"
+        parts.append(_bar(w, bar_char))
+        pos += w
+
+    bar_line = "  |" + "".join(parts) + "|"
+    print(bar_line)
+
+    # Draw time markers
+    marker_positions: list[tuple[int, str]] = []
+    pos = 1
+    for label, w, kind in timeline_segments:
+        mid = pos + w // 2
+        short = label[:10]
+        marker_positions.append((mid, short))
+        pos += w
+
+    # Simple label line
+    label_line = "  ｜"
+    for mid, short in marker_positions:
+        # Place label at segment midpoint
+        pad = mid - len(label_line)
+        if pad > 0:
+            label_line += " " * (pad - 1) + short
+    print(label_line)
+
+    # Legend
+    print()
+    print(f"  ██ = 耗时阶段    ▌ = 时间点    ")
+
+
+# ---------------------------------------------------------------------------
+#  Main
+# ---------------------------------------------------------------------------
+
 def main() -> None:
     import argparse
 
@@ -812,6 +931,7 @@ def main() -> None:
 
     # ---- Print ----
     print_summary(per_request, stage_stats, point_stats, ttft_stats)
+    print_timeline(per_request, ttft_stats)
     print_batch_stats(entries)
     print_temp_stats(entries)
 
