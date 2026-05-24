@@ -754,16 +754,16 @@ def export_csv(
 
 _TIMELINE_ORDER: list[tuple[str, str, str, str]] = [
     # (stage_name, kind, label, color)
-    # kind: "dur"=duration bar, "gap"=gap/wait bar, "pt"=point marker
-    ("render_chat", "dur", "渲染(下载+分词+HF)", "#4472C4"),
+    # kind: "dur"=execution, "gap"=wait/idle
+    ("render_chat", "dur", "渲染", "#4472C4"),
     ("gap_render_to_dispatch", "gap", "分发间隔", "#D9D9D9"),
     ("input_processing", "dur", "输入处理", "#5B9BD5"),
-    ("engine_core_dispatch", "dur", "ZMQ发送", "#ED7D31"),
+    ("engine_core_dispatch", "dur", "ZMQ", "#ED7D31"),
     ("queue_wait", "gap", "队列等待", "#D9D9D9"),
-    ("scheduler_exec", "gap", "调度处理", "#D9D9D9"),
+    ("scheduler_exec", "gap", "调度", "#D9D9D9"),
     ("gap_scheduled_to_work", "gap", "Worker排队", "#D9D9D9"),
-    ("worker_forward_pass", "dur", "LLM前向", "#A5A5A5"),
-    ("gap_work_to_output", "gap", "结果回传", "#D9D9D9"),
+    ("worker_forward_pass", "dur", "LLM前向", "#2E7D32"),
+    ("gap_work_to_output", "gap", "回传", "#D9D9D9"),
 ]
 
 
@@ -772,7 +772,7 @@ def save_timeline_image(
     ttft_stats: dict[str, float],
     output_path: str = "ttft_timeline.png",
 ) -> bool:
-    """Generate a Gantt-style timeline image showing per-stage timing."""
+    """Generate a line-style timeline image with per-stage duration labels."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -784,96 +784,91 @@ def save_timeline_image(
     if total_ms <= 0:
         return False
 
-    # Collect average per-stage durations
-    avg_vals: dict[str, float] = {}
+    # Collect average durations (ms)
+    avg_ms: dict[str, float] = {}
     for stage_name, _, _, _ in _TIMELINE_ORDER:
         vals: list[float] = []
         for stages in per_request.values():
             v = stages.get(stage_name)
             if v is not None:
                 vals.append(v)
-        avg_vals[stage_name] = (sum(vals) / len(vals) * 1000) if vals else 0
+        avg_ms[stage_name] = (sum(vals) / len(vals) * 1000) if vals else 0
 
-    # Build segments, computing cumulative start time
-    segments: list[dict] = []  # {kind, label, start, width, color, text}
-    cursor = 0.0
-    for stage_name, kind, label, color in _TIMELINE_ORDER:
-        w = avg_vals.get(stage_name, 0)
-        if w < 0.1 and kind != "pt":
-            continue
-        w = max(w, 0.3)  # minimum visible width
-        segments.append({
-            "kind": kind,
-            "label": label,
-            "start": cursor,
-            "width": w,
-            "color": color,
-        })
-        cursor += w
-
-    total_span = cursor
+    # Build timeline positions
+    segments: list[dict] = []
+    t = 0.0
+    for sn, kind, label, color in _TIMELINE_ORDER:
+        w = max(avg_ms.get(sn, 0), 0.01)
+        segments.append({"kind": kind, "label": label, "t0": t, "width": w, "color": color})
+        t += w
+    total_span = t
 
     # --- Draw ---
-    fig, ax = plt.subplots(figsize=(14, 6))
-    ax.set_xlim(0, total_span * 1.05)
+    fig, ax = plt.subplots(figsize=(16, 3.5))
+    ax.set_xlim(-total_span * 0.02, total_span * 1.08)
+    ax.set_ylim(-0.6, 1.2)
+    ax.axis("off")
 
-    y_base = 0
-    bar_height = 0.7
+    # Main horizontal axis line
+    ax.axhline(y=0, xmin=0, xmax=1, color="#333", linewidth=1.5, zorder=0)
 
-    for seg in segments:
+    # Arrow at end
+    ax.annotate("", xy=(total_span * 1.05, 0), xytext=(total_span, 0),
+                arrowprops=dict(arrowstyle="->", color="#333", lw=2))
+
+    last_t = 0.0
+    for i, seg in enumerate(segments):
+        t0 = seg["t0"]
+        width = seg["width"]
+        t1 = t0 + width
+        mid = t0 + width / 2
         kind = seg["kind"]
         color = seg["color"]
-        left = seg["start"]
-        width = seg["width"]
+        label = seg["label"]
 
+        lw = 4.5 if kind == "dur" else 1.5
+
+        # Draw segment on the axis line
+        ax.plot([t0, t1], [0, 0], color=color, linewidth=lw, solid_capstyle="butt", zorder=2)
+
+        # Tick mark at start
+        ax.plot([t0, t0], [-0.15, 0.15], color="#888", linewidth=0.8, zorder=1)
+
+        # Duration annotation above line
+        y_offset = 0.25
+        va = "bottom"
         if kind == "dur":
-            rect = plt.Rectangle((left, y_base - bar_height / 2), width, bar_height,
-                                 facecolor=color, edgecolor="white", linewidth=0.5, zorder=2)
-            ax.add_patch(rect)
-            # Label inside bar
-            if width > total_span * 0.04:
-                ax.text(left + width / 2, y_base, f"{seg['label']}\n{width:.1f}ms",
-                        ha="center", va="center", fontsize=8, color="white",
-                        fontweight="bold")
-            else:
-                ax.text(left + width / 2, y_base + 0.6, f"{width:.1f}ms",
-                        ha="center", va="bottom", fontsize=7, color="#333")
-        elif kind == "gap":
-            rect = plt.Rectangle((left, y_base - 0.12), width, 0.24,
-                                 facecolor=color, edgecolor="#BBB", linewidth=0.3, zorder=1)
-            ax.add_patch(rect)
-            if width > total_span * 0.03:
-                ax.text(left + width / 2, y_base, f"{seg['label']}\n{width:.1f}ms",
-                        ha="center", va="center", fontsize=6.5, color="#666")
+            ax.text(mid, y_offset, f"{width:.1f}ms", ha="center", va=va,
+                    fontsize=7.5, fontweight="bold", color=color)
+        else:
+            if width > total_span * 0.01:
+                ax.text(mid, y_offset, f"{width:.1f}ms", ha="center", va=va,
+                        fontsize=6.5, color="#999")
 
-        # Vertical connector line
-        ax.axvline(x=left, ymin=0.1, ymax=0.9, color="#AAA", linewidth=0.4, linestyle="--", zorder=0)
+        # Stage label below line (alternating up/down to avoid overlap)
+        # Use vertical stagger: even segments label above, odd below for dur
+        if kind == "dur":
+            label_y = 0.55 + (0.25 if i % 2 == 0 else -0.15)
+            ax.text(mid, label_y, label, ha="center", va="bottom" if label_y > 0.3 else "top",
+                    fontsize=8, fontweight="bold", color="#333")
+        else:
+            label_y = -0.28
+            ax.text(mid, label_y, label, ha="center", va="top",
+                    fontsize=6.5, color="#999")
 
-    # End marker
-    ax.axvline(x=cursor, ymin=0.1, ymax=0.9, color="#333", linewidth=1, linestyle="-", zorder=0)
-    ax.text(cursor + total_span * 0.01, y_base + 0.7, f"TTFT\n{total_ms:.0f}ms",
-            ha="left", va="bottom", fontsize=9, fontweight="bold", color="#C00000")
+    # End tick
+    ax.plot([total_span, total_span], [-0.15, 0.15], color="#888", linewidth=0.8, zorder=1)
 
-    # Decorations
-    ax.set_ylim(-1.2, 1.2)
-    ax.set_yticks([])
-    ax.set_xlabel("Time (ms)", fontsize=10)
-    ax.set_title(f"Average Pipeline Timeline  (TTFT={total_ms:.0f}ms, {ttft_stats.get('count',0)} requests)",
-                 fontsize=12, fontweight="bold")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_visible(False)
+    # Total TTFT label at end
+    ax.text(total_span * 1.01, 0, f" TTFT = {total_ms:.0f}ms",
+            ha="left", va="center", fontsize=11, fontweight="bold", color="#C00000")
 
-    # Legend
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor="#4472C4", label="Execution stages"),
-        Patch(facecolor="#D9D9D9", label="Gaps / idle time"),
-    ]
-    ax.legend(handles=legend_elements, loc="upper right", fontsize=8)
+    # Title
+    ax.set_title(f"Average Pipeline Timeline ({ttft_stats.get('count',0)} requests)",
+                 fontsize=13, fontweight="bold", pad=15)
 
     plt.tight_layout()
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    fig.savefig(output_path, dpi=180, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     return True
 
